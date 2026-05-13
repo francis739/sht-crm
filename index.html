@@ -203,22 +203,23 @@ const TYPE_OPTIONS = ['Bank','Telco','Other'];
 const STATUS_OPTIONS = ['Active','Prospect','Inactive'];
 
 // ── API ────────────────────────────────────────────────────────
+// All requests use GET + URL params to avoid CORS preflight from file://
 function useAPI(scriptUrl) {
   const call = useCallback(async (action, data) => {
     if (!scriptUrl) throw new Error('Script URL not configured');
-    const isWrite = ['addDeal','updateDeal','deleteDeal','addCustomer'].includes(action);
-    if (isWrite) {
-      const r = await fetch(scriptUrl, {
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({ action, ...data }),
+    const params = new URLSearchParams({ action });
+    if (data) {
+      // Flatten one level: { data: {...} } or { id: '...' }
+      Object.entries(data).forEach(([k, v]) => {
+        if (v !== null && v !== undefined) {
+          params.set(k, typeof v === 'object' ? JSON.stringify(v) : String(v));
+        }
       });
-      return r.json();
-    } else {
-      const url = `${scriptUrl}?action=${action}`;
-      const r = await fetch(url);
-      return r.json();
     }
+    const url = `${scriptUrl}?${params.toString()}`;
+    const r = await fetch(url, { redirect: 'follow' });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    return r.json();
   }, [scriptUrl]);
   return call;
 }
@@ -627,33 +628,50 @@ function App() {
   const [preStage, setPreStage]   = useState('Lead');
 
   const api = useAPI(scriptUrl);
+  const [syncError, setSyncError] = useState('');
 
   const load = useCallback(async () => {
     if (!scriptUrl) return;
     setLoading(true);
     setSyncState('loading');
+    setSyncError('');
     try {
       const [d, c, r] = await Promise.all([
         api('getDeals'), api('getCustomers'), api('getReps'),
       ]);
-      if (d && !d.error) setDeals(d);
-      if (c && !c.error) setCustomers(c);
-      if (r && r.length) setReps(r);
+      if (d?.error) throw new Error('Deals: ' + d.error);
+      if (c?.error) throw new Error('Customers: ' + c.error);
+      if (d && Array.isArray(d)) setDeals(d);
+      if (c && Array.isArray(c)) setCustomers(c);
+      if (r && Array.isArray(r) && r.length) setReps(r);
       setSyncState('live');
-    } catch {
+    } catch(err) {
       setSyncState('error');
+      setSyncError(err.message || 'Connection failed');
     }
     setLoading(false);
   }, [scriptUrl, api]);
 
   useEffect(() => { load(); }, [load]);
 
-  const saveUrl = () => {
+  const testAndSaveUrl = async () => {
     const u = urlInput.trim();
     if (!u) return;
-    localStorage.setItem('sht_crm_url', u);
-    setScriptUrl(u);
-    setUrlInput('');
+    setSyncState('loading');
+    setSyncError('');
+    try {
+      const res = await fetch(u + '?action=getDeals', { redirect: 'follow' });
+      if (!res.ok) throw new Error('HTTP ' + res.status + ' — check deployment settings');
+      const data = await res.json();
+      if (data && data.error) throw new Error(data.error);
+      localStorage.setItem('sht_crm_url', u);
+      setScriptUrl(u);
+      setUrlInput('');
+      setSyncState('live');
+    } catch(err) {
+      setSyncState('error');
+      setSyncError(err.message || 'Connection failed');
+    }
   };
 
   const handleAddDeal = (stage = 'Lead') => {
@@ -671,14 +689,14 @@ function App() {
     const data = { ...form, value: Number(form.value)||0, stage: form.stage || preStage };
     if (editDeal?.id) {
       if (scriptUrl) {
-        await api('updateDeal', { data: { ...data, id: editDeal.id } });
+        await api('updateDeal', { ...data, id: editDeal.id });
         await load();
       } else {
         setDeals(prev => prev.map(d => d.id === editDeal.id ? { ...d, ...data } : d));
       }
     } else {
       if (scriptUrl) {
-        await api('addDeal', { data });
+        await api('addDeal', { ...data });
         await load();
       } else {
         setDeals(prev => [...prev, { ...data, id: 'local_' + Date.now() }]);
@@ -690,7 +708,7 @@ function App() {
   const handleDeleteDeal = async (id) => {
     if (!window.confirm('Delete this deal?')) return;
     if (scriptUrl) {
-      await api('deleteDeal', { id });
+      await api('deleteDeal', { id: id });
       await load();
     } else {
       setDeals(prev => prev.filter(d => d.id !== id));
@@ -726,6 +744,17 @@ function App() {
             <div className={`sync-dot ${syncDot[syncState]}`}/>
             {syncLabel[syncState]}
           </div>
+          {syncError && (
+            <div style={{fontSize:10,color:'var(--red)',marginTop:4,lineHeight:1.4,wordBreak:'break-all'}}>
+              {syncError}
+            </div>
+          )}
+          {scriptUrl && (
+            <button className="btn" onClick={()=>{localStorage.removeItem('sht_crm_url');setScriptUrl('');setSyncState('offline');setSyncError('');}}
+              style={{marginTop:8,width:'100%',fontSize:11,padding:'4px 8px',color:'var(--faint)'}}>
+              Disconnect
+            </button>
+          )}
         </div>
       </div>
 
@@ -758,7 +787,9 @@ function App() {
                     onChange={e=>setUrlInput(e.target.value)}
                     onKeyDown={e=>e.key==='Enter'&&saveUrl()}
                   />
-                  <button className="btn btn-primary" onClick={saveUrl}>Connect</button>
+                  <button className="btn btn-primary" onClick={testAndSaveUrl}>
+                    {syncState === 'loading' ? 'Testing...' : 'Connect & Test'}
+                  </button>
                 </div>
               </div>
             </div>
