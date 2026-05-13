@@ -202,24 +202,38 @@ const STAGE_COLORS = {
 const TYPE_OPTIONS = ['Bank','Telco','Other'];
 const STATUS_OPTIONS = ['Active','Prospect','Inactive'];
 
-// ── API ────────────────────────────────────────────────────────
-// All requests use GET + URL params to avoid CORS preflight from file://
+// ── API — JSONP (works from file://) ──────────────────────────
+function jsonp(url) {
+  return new Promise((resolve, reject) => {
+    const cb = '__sht_cb_' + Date.now() + '_' + Math.random().toString(36).slice(2);
+    const script = document.createElement('script');
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error('Timeout — check Apps Script URL and deployment'));
+    }, 12000);
+    function cleanup() {
+      clearTimeout(timer);
+      delete window[cb];
+      if (script.parentNode) script.parentNode.removeChild(script);
+    }
+    window[cb] = (data) => { cleanup(); resolve(data); };
+    script.onerror = () => { cleanup(); reject(new Error('Script load failed — check Apps Script URL')); };
+    script.src = url + (url.includes('?') ? '&' : '?') + 'callback=' + cb;
+    document.head.appendChild(script);
+  });
+}
+
 function useAPI(scriptUrl) {
-  const call = useCallback(async (action, data) => {
-    if (!scriptUrl) throw new Error('Script URL not configured');
+  const call = useCallback((action, data) => {
+    if (!scriptUrl) return Promise.reject(new Error('Script URL not configured'));
     const params = new URLSearchParams({ action });
     if (data) {
-      // Flatten one level: { data: {...} } or { id: '...' }
       Object.entries(data).forEach(([k, v]) => {
-        if (v !== null && v !== undefined) {
+        if (v !== null && v !== undefined)
           params.set(k, typeof v === 'object' ? JSON.stringify(v) : String(v));
-        }
       });
     }
-    const url = `${scriptUrl}?${params.toString()}`;
-    const r = await fetch(url, { redirect: 'follow' });
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    return r.json();
+    return jsonp(`${scriptUrl}?${params.toString()}`);
   }, [scriptUrl]);
   return call;
 }
@@ -626,6 +640,7 @@ function App() {
   const [modalOpen, setModalOpen] = useState(false);
   const [editDeal, setEditDeal]   = useState(null);
   const [preStage, setPreStage]   = useState('Lead');
+  const [showSettings, setShowSettings] = useState(false);
 
   const api = useAPI(scriptUrl);
   const [syncError, setSyncError] = useState('');
@@ -660,10 +675,8 @@ function App() {
     setSyncState('loading');
     setSyncError('');
     try {
-      const res = await fetch(u + '?action=getDeals', { redirect: 'follow' });
-      if (!res.ok) throw new Error('HTTP ' + res.status + ' — check deployment settings');
-      const data = await res.json();
-      if (data && data.error) throw new Error(data.error);
+      const data = await jsonp(u + '?action=ping');
+      if (!data || !data.ok) throw new Error('Unexpected response from Apps Script');
       localStorage.setItem('sht_crm_url', u);
       setScriptUrl(u);
       setUrlInput('');
@@ -740,20 +753,42 @@ function App() {
           ))}
         </nav>
         <div className="sidebar-footer">
-          <div className="sync-status">
-            <div className={`sync-dot ${syncDot[syncState]}`}/>
-            {syncLabel[syncState]}
-          </div>
-          {syncError && (
-            <div style={{fontSize:10,color:'var(--red)',marginTop:4,lineHeight:1.4,wordBreak:'break-all'}}>
-              {syncError}
+          <div className="sync-status" style={{justifyContent:'space-between'}}>
+            <div style={{display:'flex',alignItems:'center',gap:5}}>
+              <div className={`sync-dot ${syncDot[syncState]}`}/>
+              <span>{syncLabel[syncState]}</span>
             </div>
-          )}
-          {scriptUrl && (
-            <button className="btn" onClick={()=>{localStorage.removeItem('sht_crm_url');setScriptUrl('');setSyncState('offline');setSyncError('');}}
-              style={{marginTop:8,width:'100%',fontSize:11,padding:'4px 8px',color:'var(--faint)'}}>
-              Disconnect
+            <button title="Configure Sheets URL"
+              style={{background:'none',border:'none',cursor:'pointer',color:'var(--faint)',padding:2,display:'flex',alignItems:'center'}}
+              onClick={()=>setShowSettings(s=>!s)}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
             </button>
+          </div>
+          {showSettings && (
+            <div style={{marginTop:10,padding:'10px',background:'var(--surface2)',borderRadius:'var(--radius)',border:'1px solid var(--border)'}}>
+              <div style={{fontSize:11,fontWeight:600,color:'var(--faint)',textTransform:'uppercase',letterSpacing:'0.05em',marginBottom:6}}>Apps Script URL</div>
+              <input
+                style={{width:'100%',padding:'6px 8px',border:'1px solid var(--border2)',borderRadius:'var(--radius)',background:'var(--surface)',fontSize:11,fontFamily:'DM Mono,monospace',color:'var(--text)',outline:'none',marginBottom:6}}
+                placeholder="https://script.google.com/macros/s/.../exec"
+                value={urlInput}
+                onChange={e=>setUrlInput(e.target.value)}
+                onKeyDown={e=>e.key==='Enter'&&testAndSaveUrl()}
+              />
+              {syncError && <div style={{fontSize:10,color:'var(--red)',marginBottom:6,lineHeight:1.4}}>{syncError}</div>}
+              <div style={{display:'flex',gap:6}}>
+                <button className="btn btn-primary" onClick={testAndSaveUrl}
+                  style={{flex:1,fontSize:11,padding:'5px 8px',justifyContent:'center'}}>
+                  {syncState==='loading'?'Testing...':'Connect'}
+                </button>
+                {scriptUrl && (
+                  <button className="btn" onClick={()=>{localStorage.removeItem('sht_crm_url');setScriptUrl('');setSyncState('offline');setSyncError('');setShowSettings(false);}}
+                    style={{fontSize:11,padding:'5px 8px',color:'var(--red)'}}>
+                    Disconnect
+                  </button>
+                )}
+              </div>
+              {scriptUrl && <div style={{fontSize:10,color:'var(--faint)',marginTop:6,wordBreak:'break-all',fontFamily:'DM Mono,monospace'}}>{scriptUrl.slice(0,50)}...</div>}
+            </div>
           )}
         </div>
       </div>
@@ -776,21 +811,17 @@ function App() {
         <div className="content">
           {!scriptUrl && (
             <div className="setup-banner">
-              <Icon name="sheet" size={18}/>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{flexShrink:0}}><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
               <div className="setup-banner-text">
-                <strong>Connect to Google Sheets</strong> — paste your Apps Script Web App URL below to enable live sync.
-                <div className="url-input-wrap">
-                  <input
-                    className="url-input"
-                    placeholder="https://script.google.com/macros/s/YOUR_ID/exec"
-                    value={urlInput}
-                    onChange={e=>setUrlInput(e.target.value)}
-                    onKeyDown={e=>e.key==='Enter'&&saveUrl()}
-                  />
-                  <button className="btn btn-primary" onClick={testAndSaveUrl}>
-                    {syncState === 'loading' ? 'Testing...' : 'Connect & Test'}
-                  </button>
-                </div>
+                <strong>Google Sheets not connected.</strong> Click the <strong>⚙️ gear icon</strong> at the bottom-left of the sidebar to enter your Apps Script URL.
+              </div>
+            </div>
+          )}
+          {scriptUrl && syncState === 'error' && (
+            <div className="setup-banner" style={{background:'var(--red-bg)',border:'1px solid #fca5a5'}}>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--red)" strokeWidth="2" style={{flexShrink:0}}><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+              <div className="setup-banner-text" style={{color:'var(--red)'}}>
+                <strong>Connection error:</strong> {syncError} — Click ⚙️ gear to update the URL.
               </div>
             </div>
           )}
